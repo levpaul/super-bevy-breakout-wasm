@@ -242,7 +242,7 @@ fn ball_movement_system(time: Res<Time>, mut ball_query: Query<(&Ball, &mut Tran
 
 fn scoreboard_system(scoreboard: Res<Scoreboard>, mut query: Query<&mut Text>) {
     for mut text in query.iter_mut() {
-        text.value = format!("Score: {}", scoreboard.score);
+        text.value = format!("Push Space!\nScore: {}", scoreboard.score);
     }
 }
 
