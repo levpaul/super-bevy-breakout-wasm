@@ -1,44 +1,303 @@
-use bevy::prelude::*;
+use bevy::{
+    prelude::*,
+    render::pass::ClearColor,
+    sprite::collide_aabb::{collide, Collision},
+};
 
+use rand;
+
+/// An implementation of the classic game "Breakout"
 fn main() {
-    let mut app = App::build();
-    app.add_resource(Msaa { samples: 4 })
-        .add_plugins(DefaultPlugins);
-    #[cfg(target_arch = "wasm32")]
-    app.add_plugin(bevy_webgl2::WebGL2Plugin);
-    app.add_startup_system(setup.system()).run();
+    App::build()
+        .add_plugins(bevy_webgl2::DefaultPlugins)
+        .add_resource(Scoreboard { score: 0 })
+        .add_resource(ClearColor(Color::rgb(0.9, 0.9, 0.9)))
+        .add_startup_system(setup.system())
+        .add_system(paddle_movement_system.system())
+        .add_system(ball_collision_system.system())
+        .add_system(ball_movement_system.system())
+        .add_system(scoreboard_system.system())
+        .add_system(shooty_system.system())
+        .run();
 }
 
-/// set up a simple 3D scene
+struct Paddle {
+    speed: f32,
+}
+
+struct Ball {
+    velocity: Vec3,
+}
+
+struct Scoreboard {
+    score: usize,
+}
+
+enum Collider {
+    Solid,
+    Scorable,
+    Paddle,
+}
+
+enum Wall {
+    Bottom,
+}
+
 fn setup(
     commands: &mut Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
-    // add entities to the world
+    // Add the game's entities to our world
     commands
-        // plane
-        .spawn(PbrBundle {
-            mesh: meshes.add(Mesh::from(shape::Plane { size: 5.0 })),
-            material: materials.add(Color::rgb(0.3, 0.5, 0.3).into()),
+        // cameras
+        .spawn(Camera2dBundle::default())
+        .spawn(CameraUiBundle::default())
+        // paddle
+        .spawn(SpriteBundle {
+            material: materials.add(Color::rgb(0.5, 0.5, 1.0).into()),
+            transform: Transform::from_translation(Vec3::new(0.0, -215.0, 0.0)),
+            sprite: Sprite::new(Vec2::new(120.0, 30.0)),
             ..Default::default()
         })
-        // cube
-        .spawn(PbrBundle {
-            mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
-            material: materials.add(Color::rgb(0.8, 0.7, 0.6).into()),
-            transform: Transform::from_translation(Vec3::new(0.0, 0.5, 0.0)),
+        .with(Paddle { speed: 500.0 })
+        .with(Collider::Paddle)
+        // ball
+        .spawn(SpriteBundle {
+            material: materials.add(Color::rgb(1.0, 0.5, 0.5).into()),
+            transform: Transform::from_translation(Vec3::new(0.0, -100.0, 1.0)),
+            sprite: Sprite::new(Vec2::new(30.0, 30.0)),
             ..Default::default()
         })
-        // light
-        .spawn(LightBundle {
-            transform: Transform::from_translation(Vec3::new(4.0, 8.0, 4.0)),
-            ..Default::default()
+        .with(Ball {
+            velocity: 400.0 * Vec3::new(0.5, 0.5, 0.0).normalize(),
         })
-        // camera
-        .spawn(Camera3dBundle {
-            transform: Transform::from_translation(Vec3::new(-2.0, 2.5, 5.0))
-                .looking_at(Vec3::default(), Vec3::unit_y()),
+        // scoreboard
+        .spawn(TextBundle {
+            text: Text {
+                font: asset_server.load("fonts/FiraSans-Bold.ttf"),
+                value: "Score:".to_string(),
+                style: TextStyle {
+                    color: Color::rgb(0.5, 0.5, 1.0),
+                    font_size: 40.0,
+                    ..Default::default()
+                },
+            },
+            style: Style {
+                position_type: PositionType::Absolute,
+                position: Rect {
+                    top: Val::Px(5.0),
+                    left: Val::Px(5.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             ..Default::default()
         });
+
+    // Add walls
+    let wall_material = materials.add(Color::rgb(0.8, 0.8, 0.8).into());
+    let wall_thickness = 10.0;
+    let bounds = Vec2::new(900.0, 600.0);
+
+    commands
+        // left
+        .spawn(SpriteBundle {
+            material: wall_material.clone(),
+            transform: Transform::from_translation(Vec3::new(-bounds.x / 2.0, 0.0, 0.0)),
+            sprite: Sprite::new(Vec2::new(wall_thickness, bounds.y + wall_thickness)),
+            ..Default::default()
+        })
+        .with(Collider::Solid)
+        // right
+        .spawn(SpriteBundle {
+            material: wall_material.clone(),
+            transform: Transform::from_translation(Vec3::new(bounds.x / 2.0, 0.0, 0.0)),
+            sprite: Sprite::new(Vec2::new(wall_thickness, bounds.y + wall_thickness)),
+            ..Default::default()
+        })
+        .with(Collider::Solid)
+        // bottom
+        .spawn(SpriteBundle {
+            material: wall_material.clone(),
+            transform: Transform::from_translation(Vec3::new(0.0, -bounds.y / 2.0, 0.0)),
+            sprite: Sprite::new(Vec2::new(bounds.x + wall_thickness, wall_thickness)),
+            ..Default::default()
+        })
+        .with(Collider::Solid)
+        .with(Wall::Bottom)
+        // top
+        .spawn(SpriteBundle {
+            material: wall_material,
+            transform: Transform::from_translation(Vec3::new(0.0, bounds.y / 2.0, 0.0)),
+            sprite: Sprite::new(Vec2::new(bounds.x + wall_thickness, wall_thickness)),
+            ..Default::default()
+        })
+        .with(Collider::Solid);
+
+    // Add bricks
+    let brick_rows = 4;
+    let brick_columns = 5;
+    let brick_spacing = 20.0;
+    let brick_size = Vec2::new(150.0, 30.0);
+    let bricks_width = brick_columns as f32 * (brick_size.x + brick_spacing) - brick_spacing;
+    // center the bricks and move them up a bit
+    let bricks_offset = Vec3::new(-(bricks_width - brick_size.x) / 2.0, 100.0, 0.0);
+    let brick_material = materials.add(Color::rgb(0.5, 0.5, 1.0).into());
+    for row in 0..brick_rows {
+        let y_position = row as f32 * (brick_size.y + brick_spacing);
+        for column in 0..brick_columns {
+            let brick_position = Vec3::new(
+                column as f32 * (brick_size.x + brick_spacing),
+                y_position,
+                0.0,
+            ) + bricks_offset;
+            commands
+                // brick
+                .spawn(SpriteBundle {
+                    material: brick_material.clone(),
+                    sprite: Sprite::new(brick_size),
+                    transform: Transform::from_translation(brick_position),
+                    ..Default::default()
+                })
+                .with(Collider::Scorable);
+        }
+    }
+}
+
+fn paddle_movement_system(
+    time: Res<Time>,
+    keyboard_input: Res<Input<KeyCode>>,
+    mut query: Query<(&Paddle, &mut Transform)>,
+) {
+    for (paddle, mut transform) in query.iter_mut() {
+        let mut x_direction = 0.0;
+        let mut y_direction = 0.0;
+        if keyboard_input.pressed(KeyCode::Left) {
+            x_direction -= 1.0;
+        }
+        if keyboard_input.pressed(KeyCode::Right) {
+            x_direction += 1.0;
+        }
+        if keyboard_input.pressed(KeyCode::Up) {
+            y_direction += 1.0;
+        }
+        if keyboard_input.pressed(KeyCode::Down) {
+            y_direction -= 1.0;
+        }
+
+        let translation = &mut transform.translation;
+        // move the paddle horizontally
+        translation.x += time.delta_seconds() * x_direction * paddle.speed;
+        translation.y += time.delta_seconds() * y_direction * paddle.speed;
+        // bound the paddle within the walls
+        translation.x = translation.x.min(380.0).max(-380.0);
+    }
+}
+
+fn shooty_system(
+    commands: &mut Commands,
+    mut query: Query<(&Paddle, &mut Transform)>,
+    keyboard_input: Res<Input<KeyCode>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    if !keyboard_input.pressed(KeyCode::Space) {
+        return;
+    }
+
+    for p in query.iter_mut() {
+        commands
+            .spawn(SpriteBundle {
+                material: materials.add(
+                    Color::rgb(
+                        rand::random::<f32>(),
+                        rand::random::<f32>(),
+                        rand::random::<f32>(),
+                    )
+                    .into(),
+                ),
+                transform: Transform::from_translation(Vec3::new(
+                    p.1.translation.x,
+                    p.1.translation.y,
+                    1.0,
+                )),
+                sprite: Sprite::new(Vec2::new(30.0, 30.0)),
+                ..Default::default()
+            })
+            .with(Ball {
+                velocity: 600.0
+                    * Vec3::new(rand::random::<f32>() * 1.3 - 0.65, 0.5, 0.).normalize(),
+            });
+    }
+}
+
+fn ball_movement_system(time: Res<Time>, mut ball_query: Query<(&Ball, &mut Transform)>) {
+    // clamp the timestep to stop the ball from escaping when the game starts
+    let delta_seconds = f32::min(0.2, time.delta_seconds());
+
+    for (ball, mut transform) in ball_query.iter_mut() {
+        transform.translation += ball.velocity * delta_seconds;
+    }
+}
+
+fn scoreboard_system(scoreboard: Res<Scoreboard>, mut query: Query<&mut Text>) {
+    for mut text in query.iter_mut() {
+        text.value = format!("Score: {}", scoreboard.score);
+    }
+}
+
+fn ball_collision_system(
+    commands: &mut Commands,
+    mut scoreboard: ResMut<Scoreboard>,
+    mut ball_query: Query<(&mut Ball, &Transform, &Sprite)>,
+    collider_query: Query<(Entity, &Collider, &Transform, &Sprite)>,
+) {
+    for (mut ball, ball_transform, sprite) in ball_query.iter_mut() {
+        let ball_size = sprite.size;
+        let velocity = &mut ball.velocity;
+
+        // check collision with walls
+        for (collider_entity, collider, transform, sprite) in collider_query.iter() {
+            let collision = collide(
+                ball_transform.translation,
+                ball_size,
+                transform.translation,
+                sprite.size,
+            );
+            if let Some(collision) = collision {
+                // scorable colliders should be despawned and increment the scoreboard on collision
+                if let Collider::Scorable = *collider {
+                    scoreboard.score += 1;
+                    commands.despawn(collider_entity);
+                }
+
+                // reflect the ball when it collides
+                let mut reflect_x = false;
+                let mut reflect_y = false;
+
+                // only reflect if the ball's velocity is going in the opposite direction of the collision
+                match collision {
+                    Collision::Left => reflect_x = velocity.x > 0.0,
+                    Collision::Right => reflect_x = velocity.x < 0.0,
+                    Collision::Top => reflect_y = velocity.y < 0.0,
+                    Collision::Bottom => reflect_y = velocity.y > 0.0,
+                }
+
+                // reflect velocity on the x-axis if we hit something on the x-axis
+                if reflect_x {
+                    velocity.x = -velocity.x;
+                }
+
+                // reflect velocity on the y-axis if we hit something on the y-axis
+                if reflect_y {
+                    velocity.y = -velocity.y;
+                }
+
+                // break if this collide is on a solid, otherwise continue check whether a solid is also in collision
+                if let Collider::Solid = *collider {
+                    break;
+                }
+            }
+        }
+    }
 }
